@@ -1,0 +1,73 @@
+#!/bin/bash
+
+# Log everything
+exec > /var/log/user-data.log 2>&1
+
+# Update and install Java, unzip, PostgreSQL
+apt update -y
+apt install -y openjdk-17-jdk unzip wget postgresql postgresql-contrib
+
+# Set sysctl values
+echo "vm.max_map_count=262144" >> /etc/sysctl.conf
+echo "fs.file-max=65536" >> /etc/sysctl.conf
+sysctl --system
+
+# Set security limits
+echo "sonarqube   -   nofile   65536" >> /etc/security/limits.conf
+echo "sonarqube   -   nproc    4096" >> /etc/security/limits.conf
+
+# Setup PostgreSQL
+sudo -u postgres psql <<EOF
+CREATE USER sonarqube WITH ENCRYPTED PASSWORD 'sonar123';
+CREATE DATABASE sonarqube OWNER sonarqube;
+GRANT ALL PRIVILEGES ON DATABASE sonarqube TO sonarqube;
+REVOKE ALL ON SCHEMA public FROM public;
+GRANT ALL ON SCHEMA public TO sonarqube;
+\c sonarqube;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO sonarqube;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO sonarqube;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO sonarqube;
+EOF
+
+# Create user and download SonarQube
+adduser --system --no-create-home --group sonarqube
+wget https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-25.6.0.109173.zip
+unzip sonarqube-25.6.0.109173.zip -d /opt/
+mv /opt/sonarqube-25.6.0.109173 /opt/sonarqube
+chown -R sonarqube:sonarqube /opt/sonarqube
+
+# Configure sonar.properties
+cat > /opt/sonarqube/conf/sonar.properties <<EOL
+sonar.jdbc.username=sonarqube
+sonar.jdbc.password=sonar123
+sonar.jdbc.url=jdbc:postgresql://localhost/sonarqube?currentSchema=public
+EOL
+
+# Create systemd service
+cat > /etc/systemd/system/sonarqube.service <<EOL
+[Unit]
+Description=SonarQube service
+After=syslog.target network.target postgresql.service
+
+[Service]
+Type=simple
+User=sonarqube
+Group=sonarqube
+PermissionsStartOnly=true
+ExecStart=/opt/sonarqube/bin/linux-x86-64/sonar.sh start
+ExecStop=/opt/sonarqube/bin/linux-x86-64/sonar.sh stop
+Restart=on-failure
+LimitNOFILE=65536
+LimitNPROC=4096
+TimeoutStartSec=5
+TimeoutStopSec=5
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+# Enable and start the service
+systemctl daemon-reload
+systemctl enable sonarqube
+systemctl start sonarqube
